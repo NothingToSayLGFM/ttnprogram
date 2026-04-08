@@ -1,6 +1,27 @@
+import time
+
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 API_URL = "https://api.novaposhta.ua/v2.0/json/"
+MAX_RETRIES = 5
+
+
+class NPConnectionError(Exception):
+    """Raised when all retry attempts to the Nova Poshta API have failed."""
+    pass
+
+
+def _make_session() -> requests.Session:
+    session = requests.Session()
+    adapter = HTTPAdapter(max_retries=Retry(total=0))
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
+
+
+_session = _make_session()
 
 
 def call(api_key: str, model: str, method: str, properties: dict = None) -> dict:
@@ -10,9 +31,19 @@ def call(api_key: str, model: str, method: str, properties: dict = None) -> dict
         "calledMethod": method,
         "methodProperties": properties or {},
     }
-    r = requests.post(API_URL, json=payload, timeout=30)
-    r.raise_for_status()
-    return r.json()
+    last_err: Exception | None = None
+    for attempt in range(MAX_RETRIES):
+        try:
+            r = _session.post(API_URL, json=payload, timeout=30)
+            r.raise_for_status()
+            return r.json()
+        except (requests.exceptions.SSLError, requests.exceptions.ConnectionError) as e:
+            last_err = e
+            if attempt < MAX_RETRIES - 1:
+                time.sleep(2 ** attempt)  # 1, 2, 4, 8 s between attempts
+    raise NPConnectionError(
+        f"Усі {MAX_RETRIES} спроби з'єднатися з Новою Поштою провалились"
+    ) from last_err
 
 
 def get_document_info(api_key: str, ttn: str) -> dict | None:

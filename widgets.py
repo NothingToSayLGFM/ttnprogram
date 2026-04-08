@@ -28,9 +28,10 @@ class TTNRow(ctk.CTkFrame):
         "error":      (C_RED,    ""),
     }
 
-    def __init__(self, parent, index: int, ttn: str):
+    def __init__(self, parent, index: int, ttn: str, on_retry=None):
         super().__init__(parent, fg_color=C_DARK, corner_radius=5)
-        self.grid_columnconfigure(3, weight=1)  # spacer между кнопкой и статусом
+        self.grid_columnconfigure(3, weight=1)  # spacer між кнопкою і статусом
+        self._on_retry = on_retry
 
         ctk.CTkLabel(
             self, text=f"#{index}", width=32,
@@ -58,7 +59,20 @@ class TTNRow(ctk.CTkFrame):
             self, text="Очікує", width=160, anchor="e",
             font=ctk.CTkFont(size=11), text_color=C_GRAY
         )
-        self.lbl.grid(row=0, column=5, padx=(0, 10))
+        self.lbl.grid(row=0, column=5, padx=(0, 6))
+
+        self._retry_btn = ctk.CTkButton(
+            self, text="↻", width=28, height=20,
+            fg_color=C_ORANGE, hover_color="#c87f0a",
+            font=ctk.CTkFont(size=12),
+            command=self._handle_retry,
+        )
+        self._retry_btn.grid(row=0, column=6, padx=(0, 8))
+        self._retry_btn.grid_remove()  # hidden until status == "error"
+
+    def _handle_retry(self):
+        if self._on_retry:
+            self._on_retry()
 
     def set_status(self, status: str, msg: str = ""):
         color, text = self.COLORS.get(status, (C_GRAY, status))
@@ -66,6 +80,10 @@ class TTNRow(ctk.CTkFrame):
             text = msg
         self.dot.configure(text_color=color)
         self.lbl.configure(text=text, text_color=color)
+        if status == "error":
+            self._retry_btn.grid()
+        else:
+            self._retry_btn.grid_remove()
 
     def add_sub_ttns(self, sub_ttns: list[str]):
         """Render sub-TTNs indented below parent in row=1."""

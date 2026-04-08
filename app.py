@@ -247,7 +247,8 @@ class App(ctk.CTk):
             if len(ttn) == 18 and ttn[:14] in file_ttn_set:
                 abs_idx += 1
                 continue
-            row = TTNRow(self.ttn_list, abs_idx + 1, ttn)
+            row = TTNRow(self.ttn_list, abs_idx + 1, ttn,
+                         on_retry=lambda i=abs_idx, t=ttn: self._retry_single_ttn(i, t))
             row.grid(row=grid_row, column=0, sticky="ew", pady=2)
             self.ttn_rows[abs_idx] = row
             self.ttn_indices.setdefault(ttn, []).append(abs_idx)
@@ -345,7 +346,8 @@ class App(ctk.CTk):
                     if len(ttn) == 18 and ttn[:14] in file_ttn_set:
                         abs_start += 1
                         continue
-                    row = TTNRow(self.ttn_list, abs_start + 1, ttn)
+                    row = TTNRow(self.ttn_list, abs_start + 1, ttn,
+                                 on_retry=lambda i=abs_start, t=ttn: self._retry_single_ttn(i, t))
                     row.grid(row=grid_row, column=0, sticky="ew", pady=2)
                     self.ttn_rows[abs_start] = row
                     self.ttn_indices.setdefault(ttn, []).append(abs_start)
@@ -421,7 +423,12 @@ class App(ctk.CTk):
                         if prev_idx < abs_idx:
                             self.event_queue.put(("ttn_status", prev_idx, ttn, "duplicate", "Дублікат"))
 
-                status, doc = sc.validate_ttn(api_key, ttn)
+                try:
+                    status, doc = sc.validate_ttn(api_key, ttn)
+                except np_api.NPConnectionError:
+                    self.event_queue.put(("ttn_status", abs_idx, ttn, "error", "Помилка з'єднання"))
+                    self.event_queue.put(("np_connection_error",))
+                    return
                 time.sleep(1.0)
 
                 if status == 'ok':
@@ -657,6 +664,89 @@ class App(ctk.CTk):
             self.analyze_btn.configure(state="normal", text="Аналізувати")
             self._status("Всі ТТН розподілено!")
 
+    # ── Retry одної ТТН ───────────────────────────────────
+
+    def _retry_single_ttn(self, abs_idx: int, ttn: str):
+        api_key = self.api_key.get().strip()
+        if not api_key:
+            return
+        self.event_queue.put(("ttn_status", abs_idx, ttn, "processing", ""))
+
+        def _worker():
+            try:
+                status, doc = sc.validate_ttn(api_key, ttn)
+            except np_api.NPConnectionError:
+                self.event_queue.put(("ttn_status", abs_idx, ttn, "error", "Помилка з'єднання"))
+                self.event_queue.put(("np_connection_error",))
+                return
+            except Exception as e:
+                self.event_queue.put(("ttn_status", abs_idx, ttn, "error", str(e)))
+                return
+
+            if status == "ok":
+                self.event_queue.put(("ttn_status", abs_idx, ttn, "ok",
+                                      doc.get("SenderDescription", "")))
+                self.event_queue.put(("retry_ttn_ok", abs_idx, ttn, doc))
+            elif status == "already_in_registry":
+                sheet = doc.get("ScanSheetNumber", "") if doc else ""
+                self.event_queue.put(("ttn_status", abs_idx, ttn, "already",
+                                      f"Реєстр {sheet}"))
+            else:
+                self.event_queue.put(("ttn_status", abs_idx, ttn, "not_found", ""))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _handle_retry_ttn_ok(self, abs_idx: int, ttn: str, doc: dict):
+        """Integrate a successfully retried TTN into groups and refresh registry cards."""
+        self._canonical_indices[ttn] = abs_idx
+        new_groups = sc.group_ttns([(ttn, doc)])
+        for key, group in new_groups.items():
+            if key in self.all_groups:
+                existing = self.all_groups[key]
+                if ttn not in existing["ttns"]:
+                    existing["ttns"].append(ttn)
+                    existing["doc_refs"].append(doc.get("Ref", ""))
+            else:
+                self.all_groups[key] = {
+                    **group,
+                    "ttns": list(group.get("ttns", [])),
+                    "doc_refs": list(group.get("doc_refs", [])),
+                }
+        self.groups = new_groups
+        self._render_registry_cards()
+        if self.all_groups:
+            self.distribute_btn.configure(state="normal")
+
+    def _show_np_connection_error_popup(self):
+        popup = ctk.CTkToplevel(self)
+        popup.title("Помилка з'єднання")
+        popup.geometry("420x180")
+        popup.resizable(False, False)
+        popup.grab_set()
+        popup.lift()
+        popup.focus_force()
+
+        ctk.CTkLabel(
+            popup,
+            text="Усі спроби з'єднатись з Новою Поштою провалились.\n"
+                 "Перезапустіть програму або зачекайте декілька хвилин\n"
+                 "і спробуйте знову.",
+            font=ctk.CTkFont(size=13), text_color=C_ORANGE,
+            wraplength=380, justify="center",
+        ).pack(expand=True, pady=(24, 10))
+
+        def _ok():
+            popup.grab_release()
+            popup.destroy()
+
+        ctk.CTkButton(
+            popup, text="OK", width=100, height=34,
+            fg_color=C_ORANGE, hover_color="#c87f0a",
+            command=_ok,
+        ).pack(pady=(0, 20))
+
+        popup.protocol("WM_DELETE_WINDOW", _ok)
+
     # ── Утиліти ───────────────────────────────────────────
 
     def _clear_ui(self):
@@ -774,6 +864,15 @@ class App(ctk.CTk):
                     self._show_warning_popup(msg, reply_event)
                 case "log":
                     self._status(ev[1])
+                case "np_connection_error":
+                    self.analyze_btn.configure(state="normal")
+                    self._analyze_all_mode = False
+                    self.analyze_all_btn.configure(text="Аналізувати все")
+                    self._status("Помилка з'єднання з Новою Поштою.")
+                    self._show_np_connection_error_popup()
+                case "retry_ttn_ok":
+                    _, abs_idx, ttn, doc = ev
+                    self._handle_retry_ttn_ok(abs_idx, ttn, doc)
                 case "worker_error":
                     _, err_msg, tb = ev
                     self.analyze_btn.configure(state="normal")
