@@ -17,6 +17,7 @@ sys.modules['tkinter']       = _tk_mock
 sys.modules['tkinter.filedialog'] = MagicMock()
 sys.modules['api']           = MagicMock()
 sys.modules['widgets']       = MagicMock()
+sys.modules['desktop_client'] = MagicMock()
 
 # Patch ctk.set_appearance_mode / set_default_color_theme (called at module level)
 _ctk_mock.set_appearance_mode = MagicMock()

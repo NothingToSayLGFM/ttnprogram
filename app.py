@@ -11,7 +11,7 @@ import customtkinter as ctk
 
 import api as np_api
 import scanner as sc
-import auth as ttnflow_auth
+import desktop_client as dc
 from widgets import (
     C_GREEN, C_ORANGE, C_RED, C_GRAY, C_BLUE,
     TTNRow, RegistryCard, PrintedModal,
@@ -34,24 +34,8 @@ class App(ctk.CTk):
         self.geometry("1020x720")
         self.minsize(800, 520)
 
-        # ── Auth gate ─────────────────────────────────────────
-        if not ttnflow_auth.is_logged_in():
-            if not self._show_login_dialog():
-                self.destroy()
-                return
-        else:
-            # Refresh tokens silently on startup
-            ttnflow_auth.get_valid_access_token()
-
-        if not ttnflow_auth.check_subscription():
-            self._show_no_subscription()
-            self.destroy()
-            return
-
         cfg = self._load_config()
-        # API key comes from the backend, falling back to local config
-        fetched_key = ttnflow_auth.get_np_api_key()
-        self.api_key    = ctk.StringVar(value=fetched_key or cfg.get("api_key", ""))
+        self.api_key    = ctk.StringVar(value=cfg.get("api_key", ""))
         self.input_file = ctk.StringVar(value=cfg.get("input_file", ""))
 
         self.event_queue: queue.Queue = queue.Queue()
@@ -115,12 +99,6 @@ class App(ctk.CTk):
             command=self._open_settings
         ).grid(row=0, column=2)
 
-        ctk.CTkButton(
-            right_btn_row, text="⏻", width=36, height=36,
-            fg_color="#6b2929", hover_color="#8b3a3a",
-            font=ctk.CTkFont(size=16),
-            command=self._logout
-        ).grid(row=0, column=3, padx=(4, 0))
 
         # ── Ліва панель: список ТТН ──
         left = ctk.CTkFrame(self, fg_color="transparent")
@@ -281,6 +259,19 @@ class App(ctk.CTk):
         self.distribute_btn.configure(state="disabled")
         self._stop_analysis.clear()
 
+        # ── Balance pre-check ────────────────────────────────
+        # Run in background so we don't block the main thread
+        def _balance_check_worker():
+            balance = dc.check_balance()
+            self.event_queue.put(("balance_check_result", balance))
+
+        threading.Thread(target=_balance_check_worker, daemon=True).start()
+        # Actual analysis will start after balance_check_result is processed
+        self._pending_analyze_params = (api_key, input_file)
+        return
+
+    def _start_analyze_after_balance_check(self, api_key: str, input_file: str):
+
         # Читаємо файл і порівнюємо з поточним станом UI
         try:
             fresh_chunks = sc.read_chunks(input_file)
@@ -393,6 +384,7 @@ class App(ctk.CTk):
             parent_sub_map: dict[str, list[str]] = {}   # parent ttn -> [sub_ttns]
             _sheet_name_cache: dict = {}
             _file_ttn_set = set(self.all_ttns)
+            scanned_count: int = 0  # actual TTNs validated (for balance deduction)
 
             def _sheet_label(sheet_number: str) -> str:
                 if sheet_number not in _sheet_name_cache:
@@ -423,6 +415,7 @@ class App(ctk.CTk):
                         if prev_idx < abs_idx:
                             self.event_queue.put(("ttn_status", prev_idx, ttn, "duplicate", "Дублікат"))
 
+                scanned_count += 1
                 try:
                     status, doc = sc.validate_ttn(api_key, ttn)
                 except np_api.NPConnectionError:
@@ -492,13 +485,17 @@ class App(ctk.CTk):
                     self.event_queue.put(("ttn_status", idx, ttn, "duplicate", "Дублікат"))
 
             groups = sc.group_ttns(list(ok_pairs.values()))
-            self.event_queue.put(("analysis_done", groups, canonical, parent_sub_map))
+            self.event_queue.put(("analysis_done", groups, canonical, parent_sub_map, scanned_count))
           except Exception as e:
             self.event_queue.put(("worker_error", str(e), traceback.format_exc()))
 
         threading.Thread(target=_worker, daemon=True).start()
 
-    def _handle_analysis_done(self, groups: dict, canonical: dict, parent_sub_map: dict):
+    def _handle_analysis_done(self, groups: dict, canonical: dict, parent_sub_map: dict, scanned_count: int = 0):
+        # Deduct scanned TTNs from balance in background
+        if scanned_count > 0:
+            threading.Thread(target=dc.deduct, args=(scanned_count,), daemon=True).start()
+
         self._canonical_indices.update(canonical)
         self.groups = groups
         # Merge groups into all_groups: add only new TTNs, never overwrite existing ones.
@@ -856,7 +853,33 @@ class App(ctk.CTk):
                     if row:
                         row.set_status(status, msg)
                 case "analysis_done":
-                    self._handle_analysis_done(ev[1], ev[2], ev[3])
+                    self._handle_analysis_done(ev[1], ev[2], ev[3], ev[4] if len(ev) > 4 else 0)
+                case "balance_check_result":
+                    _, balance = ev
+                    params = getattr(self, '_pending_analyze_params', None)
+                    self._pending_analyze_params = None
+                    if params is None:
+                        break
+                    api_key, input_file = params
+                    # Count non-sub TTNs to scan (rough estimate from file)
+                    try:
+                        fresh_chunks = sc.read_chunks(input_file)
+                        file_ttn_set = set(t for c in fresh_chunks for t in c)
+                        sel = self.selected_chunk_var.get()
+                        chunk_to_scan = fresh_chunks[sel] if sel < len(fresh_chunks) else []
+                        needed = sum(
+                            1 for t in chunk_to_scan
+                            if not (len(t) == 18 and t[:14] in file_ttn_set)
+                        )
+                    except Exception:
+                        needed = 0
+                    # -1 = unlimited, None = no credentials (skip check)
+                    if balance is not None and balance != -1 and needed > balance:
+                        self.analyze_btn.configure(state="normal")
+                        self.distribute_btn.configure(state="normal" if self.all_groups else "disabled")
+                        self._show_insufficient_balance_popup(balance, needed)
+                    else:
+                        self._start_analyze_after_balance_check(api_key, input_file)
                 case "distribute_done":
                     self._handle_distribute_done(ev[1])
                 case "show_warning":
@@ -893,67 +916,41 @@ class App(ctk.CTk):
         return {}
 
     def _save_config(self):
-        CONFIG_FILE.write_text(json.dumps(
-            {"api_key": self.api_key.get(), "input_file": self.input_file.get()},
-            ensure_ascii=False
-        ))
+        # Preserve existing fields (email, desktop_token) when saving user settings
+        existing = self._load_config()
+        existing["api_key"] = self.api_key.get()
+        existing["input_file"] = self.input_file.get()
+        CONFIG_FILE.write_text(json.dumps(existing, ensure_ascii=False, indent=2))
 
-    # ── Auth helpers ───────────────────────────────────────
-
-    def _show_login_dialog(self) -> bool:
-        """Show login dialog. Returns True if login succeeded."""
-        result = {"ok": False}
-        dialog = ctk.CTkToplevel(self)
-        dialog.title("Увійти до TTNFlow")
-        dialog.geometry("380x280")
-        dialog.grab_set()
-        dialog.resizable(False, False)
-
-        ctk.CTkLabel(dialog, text="TTNFlow — вхід", font=ctk.CTkFont(size=16, weight="bold")).pack(pady=(20, 10))
-
-        email_var = ctk.StringVar()
-        pass_var = ctk.StringVar()
-        err_var = ctk.StringVar()
-
-        ctk.CTkLabel(dialog, text="Email").pack(anchor="w", padx=30)
-        ctk.CTkEntry(dialog, textvariable=email_var, width=320).pack(padx=30, pady=(0, 8))
-        ctk.CTkLabel(dialog, text="Пароль").pack(anchor="w", padx=30)
-        ctk.CTkEntry(dialog, textvariable=pass_var, show="*", width=320).pack(padx=30, pady=(0, 4))
-        ctk.CTkLabel(dialog, textvariable=err_var, text_color="#ff6b6b").pack(pady=2)
-
-        def do_login():
-            if ttnflow_auth.login(email_var.get(), pass_var.get()):
-                result["ok"] = True
-                dialog.destroy()
-            else:
-                err_var.set("Невірний email або пароль")
-
-        ctk.CTkButton(dialog, text="Увійти", command=do_login, width=320).pack(padx=30, pady=10)
-
-        dialog.wait_window()
-        return result["ok"]
-
-    def _show_no_subscription(self) -> None:
-        """Show a blocking message about missing subscription."""
-        dialog = ctk.CTkToplevel(self)
-        dialog.title("Немає підписки")
-        dialog.geometry("400x200")
-        dialog.grab_set()
-        dialog.resizable(False, False)
+    def _show_insufficient_balance_popup(self, balance: int, needed: int):
+        popup = ctk.CTkToplevel(self)
+        popup.title("Недостатньо сканувань")
+        popup.geometry("420x220")
+        popup.resizable(False, False)
+        popup.grab_set()
+        popup.lift()
+        popup.focus_force()
 
         ctk.CTkLabel(
-            dialog,
-            text="У вас немає активної підписки.\n\nЗверніться до адміна для її отримання.",
-            font=ctk.CTkFont(size=14),
-            wraplength=340,
-        ).pack(pady=30, padx=20)
-        ctk.CTkButton(dialog, text="Закрити", command=dialog.destroy).pack()
-        dialog.wait_window()
+            popup,
+            text=f"Недостатньо сканувань!\n\n"
+                 f"Потрібно: {needed}  |  Доступно: {balance}\n\n"
+                 f"Поповніть баланс на сторінці ttnflow.com/app/",
+            font=ctk.CTkFont(size=13), text_color=C_ORANGE,
+            wraplength=380, justify="center",
+        ).pack(expand=True, pady=(24, 10))
 
-    def _logout(self) -> None:
-        """Log out and close the application."""
-        ttnflow_auth.logout()
-        self.destroy()
+        def _ok():
+            popup.grab_release()
+            popup.destroy()
+
+        ctk.CTkButton(
+            popup, text="OK", width=100, height=34,
+            fg_color=C_ORANGE, hover_color="#c87f0a",
+            command=_ok,
+        ).pack(pady=(0, 20))
+
+        popup.protocol("WM_DELETE_WINDOW", _ok)
 
 
 if __name__ == "__main__":
