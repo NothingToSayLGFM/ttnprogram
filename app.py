@@ -258,17 +258,7 @@ class App(ctk.CTk):
         self.analyze_btn.configure(state="disabled")
         self.distribute_btn.configure(state="disabled")
         self._stop_analysis.clear()
-
-        # ── Balance pre-check ────────────────────────────────
-        # Run in background so we don't block the main thread
-        def _balance_check_worker():
-            balance = dc.check_balance()
-            self.event_queue.put(("balance_check_result", balance))
-
-        threading.Thread(target=_balance_check_worker, daemon=True).start()
-        # Actual analysis will start after balance_check_result is processed
-        self._pending_analyze_params = (api_key, input_file)
-        return
+        self._start_analyze_after_balance_check(api_key, input_file)
 
     def _start_analyze_after_balance_check(self, api_key: str, input_file: str):
 
@@ -868,32 +858,6 @@ class App(ctk.CTk):
                         row.set_status(status, msg)
                 case "analysis_done":
                     self._handle_analysis_done(ev[1], ev[2], ev[3], ev[4] if len(ev) > 4 else 0)
-                case "balance_check_result":
-                    _, balance = ev
-                    params = getattr(self, '_pending_analyze_params', None)
-                    self._pending_analyze_params = None
-                    if params is None:
-                        break
-                    api_key, input_file = params
-                    # Count non-sub TTNs to scan (rough estimate from file)
-                    try:
-                        fresh_chunks = sc.read_chunks(input_file)
-                        file_ttn_set = set(t for c in fresh_chunks for t in c)
-                        sel = self.selected_chunk_var.get()
-                        chunk_to_scan = fresh_chunks[sel] if sel < len(fresh_chunks) else []
-                        needed = sum(
-                            1 for t in chunk_to_scan
-                            if not (len(t) == 18 and t[:14] in file_ttn_set)
-                        )
-                    except Exception:
-                        needed = 0
-                    # -1 = unlimited, None = no credentials (skip check)
-                    if balance is not None and balance != -1 and needed > balance:
-                        self.analyze_btn.configure(state="normal")
-                        self.distribute_btn.configure(state="normal" if self.all_groups else "disabled")
-                        self._show_insufficient_balance_popup(balance, needed)
-                    else:
-                        self._start_analyze_after_balance_check(api_key, input_file)
                 case "distribute_done":
                     self._handle_distribute_done(ev[1])
                 case "show_warning":
