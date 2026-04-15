@@ -603,6 +603,12 @@ class App(ctk.CTk):
         if not api_key:
             return
 
+        needed = sum(len(g.get('ttns', [])) for g in self.all_groups.values())
+        balance = dc.check_balance()
+        if balance is not None and balance != -1 and balance < needed:
+            self._show_insufficient_balance_popup(balance, needed)
+            return
+
         self.distribute_btn.configure(state="disabled", text="Розподіляю...")
         self._status("Розподіл по реєстрах...")
 
