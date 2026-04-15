@@ -60,3 +60,27 @@ def deduct(count: int) -> int | None:
     except requests.RequestException:
         pass
     return None
+
+
+def report_scan(ttns: list[dict], device_type: str = "desktop") -> int | None:
+    """Send scan report after auto-distribution.
+
+    Each dict in ttns: {"ttn": str, "status": str, "registry": str, "message": str}
+    Deducts only 'done' TTNs server-side.
+    Returns new scan_balance or None on error/no credentials.
+    """
+    creds = get_credentials()
+    if not creds:
+        return None
+    email, token = creds
+    try:
+        resp = requests.post(
+            f"{API_BASE}/desktop/scan-report",
+            json={"email": email, "token": token, "device_type": device_type, "ttns": ttns},
+            timeout=15,
+        )
+        if resp.status_code == 200:
+            return resp.json().get("scan_balance")
+    except requests.RequestException:
+        pass
+    return None

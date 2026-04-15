@@ -56,10 +56,10 @@ python app.py
 ## Building the executable
 
 ```
-pyinstaller NovaPoshtaScanner.spec
+pyinstaller TTNScanner.spec
 ```
 
-Output goes to `dist/NovaPoshtaScanner/`.
+Output goes to `dist/TTNScanner/`.
 
 
 ## Running tests

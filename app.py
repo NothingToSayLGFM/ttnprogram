@@ -30,7 +30,7 @@ ctk.set_default_color_theme("dark-blue")
 class App(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.title("Nova Poshta Scanner  [API v2]")
+        self.title("TTNFlow Scanner")
         self.geometry("1020x720")
         self.minsize(800, 520)
 
@@ -492,10 +492,6 @@ class App(ctk.CTk):
         threading.Thread(target=_worker, daemon=True).start()
 
     def _handle_analysis_done(self, groups: dict, canonical: dict, parent_sub_map: dict, scanned_count: int = 0):
-        # Deduct scanned TTNs from balance in background
-        if scanned_count > 0:
-            threading.Thread(target=dc.deduct, args=(scanned_count,), daemon=True).start()
-
         self._canonical_indices.update(canonical)
         self.groups = groups
         # Merge groups into all_groups: add only new TTNs, never overwrite existing ones.
@@ -622,14 +618,21 @@ class App(ctk.CTk):
         threading.Thread(target=_worker, daemon=True).start()
 
     def _handle_distribute_done(self, results: dict):
+        all_ttn_report: list[dict] = []
         for key, res_list in results.items():
             group = self.all_groups.get(key, {})
-            card  = self.all_reg_cards.get(group.get('suggested_name', ''))
+            registry_name = group.get('suggested_name', '')
+            card  = self.all_reg_cards.get(registry_name)
             if card:
                 done_ttns = [ttn for ttn, s, _ in res_list if s == 'done']
                 err  = sum(1 for _, s, _ in res_list if s == 'error')
                 card.set_done(len(done_ttns), err, done_ttns)
             for ttn, status, msg in res_list:
+                all_ttn_report.append({
+                    "ttn": ttn, "status": status,
+                    "registry": registry_name if status == 'done' else "",
+                    "message": msg or "",
+                })
                 canonical_idx = self._canonical_indices.get(ttn)
                 if canonical_idx is not None:
                     row = self.ttn_rows.get(canonical_idx)
@@ -640,6 +643,11 @@ class App(ctk.CTk):
                         row = self.ttn_rows.get(idx)
                         if row:
                             row.set_status(status, msg)
+
+        if all_ttn_report:
+            threading.Thread(
+                target=dc.report_scan, args=(all_ttn_report, "desktop"), daemon=True
+            ).start()
 
         self.distribute_btn.configure(text="Авторозподіл", state="disabled")
         self.done_reg_rows = len(self.reg_list.winfo_children())
