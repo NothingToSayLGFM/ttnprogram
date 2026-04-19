@@ -62,6 +62,61 @@ def deduct(count: int) -> int | None:
     return None
 
 
+def create_session(ttns: list[dict], device_type: str = "desktop") -> str | None:
+    """Create a running session with analysis TTNs. Returns session_id or None."""
+    creds = get_credentials()
+    if not creds:
+        return None
+    email, token = creds
+    try:
+        resp = requests.post(
+            f"{API_BASE}/desktop/session-create",
+            json={"email": email, "token": token, "device_type": device_type, "ttns": ttns},
+            timeout=15,
+        )
+        if resp.status_code == 201:
+            return resp.json().get("session_id")
+    except requests.RequestException:
+        pass
+    return None
+
+
+def update_session_ttns(session_id: str, ttns: list[dict]) -> bool:
+    """Replace TTNs in an existing running session (call after each subsequent analysis chunk)."""
+    creds = get_credentials()
+    if not creds:
+        return False
+    email, token = creds
+    try:
+        resp = requests.post(
+            f"{API_BASE}/desktop/session/{session_id}/update-ttns",
+            json={"email": email, "token": token, "ttns": ttns},
+            timeout=15,
+        )
+        return resp.status_code == 200
+    except requests.RequestException:
+        return False
+
+
+def finish_session(session_id: str, ttns: list[dict], device_type: str = "desktop") -> int | None:
+    """Finish session with distribution results. Returns new scan_balance or None."""
+    creds = get_credentials()
+    if not creds:
+        return None
+    email, token = creds
+    try:
+        resp = requests.post(
+            f"{API_BASE}/desktop/session/{session_id}/finish",
+            json={"email": email, "token": token, "ttns": ttns},
+            timeout=15,
+        )
+        if resp.status_code == 200:
+            return resp.json().get("scan_balance")
+    except requests.RequestException:
+        pass
+    return None
+
+
 def report_scan(ttns: list[dict], device_type: str = "desktop") -> int | None:
     """Send scan report after auto-distribution.
 

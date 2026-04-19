@@ -55,6 +55,8 @@ class App(ctk.CTk):
         self._canonical_indices: dict[str, int] = {}  # ttn -> canonical abs_idx (last 'ok')
         self._parent_sub_map: dict[str, list[str]] = {}  # parent ttn -> [sub_ttns]
         self._analyze_all_mode = False
+        self._current_session_id: str | None = None
+        self._ttn_statuses: dict[str, tuple[str, str]] = {}  # ttn -> (status, message)
 
         self._build_ui()
         self.after(80, self._poll_events)
@@ -508,6 +510,7 @@ class App(ctk.CTk):
         self.distribute_btn.configure(state="normal" if self.all_groups else "disabled")
         self._parent_sub_map.update(parent_sub_map)
         self._apply_sub_ttn_grouping(parent_sub_map, canonical)
+        self._save_analysis_async()
 
         sel      = self.selected_chunk_var.get()
         n_chunks = len(self.all_chunks)
@@ -543,6 +546,26 @@ class App(ctk.CTk):
             else:
                 self._analyze_all_mode = False
                 self.analyze_all_btn.configure(text="Аналізувати все")
+
+    def _save_analysis_async(self):
+        """Save accumulated analysis TTN statuses to backend in a background thread."""
+        ttns = [
+            {"ttn": ttn, "status": status, "message": msg}
+            for ttn, (status, msg) in self._ttn_statuses.items()
+        ]
+        if not ttns:
+            return
+        session_id = self._current_session_id
+
+        def _worker():
+            if session_id is None:
+                sid = dc.create_session(ttns)
+                if sid:
+                    self._current_session_id = sid
+            else:
+                dc.update_session_ttns(session_id, ttns)
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     def _apply_sub_ttn_grouping(self, parent_sub_map: dict, canonical: dict):
         """Attach sub-TTN labels to their parent TTNRow widgets."""
@@ -641,10 +664,18 @@ class App(ctk.CTk):
                             row.set_status(status, msg)
 
         if all_ttn_report:
-            threading.Thread(
-                target=dc.report_scan, args=(all_ttn_report, "desktop"), daemon=True
-            ).start()
+            session_id = self._current_session_id
 
+            def _finish_worker():
+                if session_id:
+                    dc.finish_session(session_id, all_ttn_report, "desktop")
+                else:
+                    dc.report_scan(all_ttn_report, "desktop")
+
+            threading.Thread(target=_finish_worker, daemon=True).start()
+
+        self._current_session_id = None
+        self._ttn_statuses.clear()
         self.distribute_btn.configure(text="Авторозподіл", state="disabled")
         self.done_reg_rows = len(self.reg_list.winfo_children())
         self.all_groups.clear()
@@ -770,6 +801,8 @@ class App(ctk.CTk):
         self.analyze_btn.configure(text="Аналізувати")
         self._analyze_all_mode = False
         self.analyze_all_btn.configure(text="Аналізувати все")
+        self._current_session_id = None
+        self._ttn_statuses.clear()
 
     def _show_warning_popup(self, message: str, reply_event: threading.Event):
         popup = ctk.CTkToplevel(self)
@@ -856,6 +889,9 @@ class App(ctk.CTk):
                     row = self.ttn_rows.get(abs_idx)
                     if row:
                         row.set_status(status, msg)
+                    if status not in ("processing",):
+                        norm = {"already": "already_in_registry"}.get(status, status)
+                        self._ttn_statuses[ttn] = (norm, msg)
                 case "analysis_done":
                     self._handle_analysis_done(ev[1], ev[2], ev[3], ev[4] if len(ev) > 4 else 0)
                 case "distribute_done":
