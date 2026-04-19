@@ -547,6 +547,21 @@ class App(ctk.CTk):
                 self._analyze_all_mode = False
                 self.analyze_all_btn.configure(text="Аналізувати все")
 
+    def _abandon_session_async(self):
+        """Finish any open running session without distribution (e.g. on reset/new file)."""
+        session_id = self._current_session_id
+        if not session_id:
+            return
+        ttns = [
+            {"ttn": ttn, "status": status, "message": msg, "registry": ""}
+            for ttn, (status, msg) in self._ttn_statuses.items()
+        ]
+
+        def _worker():
+            dc.finish_session(session_id, ttns)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
     def _save_analysis_async(self):
         """Save accumulated analysis TTN statuses to backend in a background thread."""
         ttns = [
@@ -801,6 +816,7 @@ class App(ctk.CTk):
         self.analyze_btn.configure(text="Аналізувати")
         self._analyze_all_mode = False
         self.analyze_all_btn.configure(text="Аналізувати все")
+        self._abandon_session_async()
         self._current_session_id = None
         self._ttn_statuses.clear()
 

@@ -14,7 +14,7 @@ CONFIG_FILE = BASE_DIR / "config.json"
 def get_credentials() -> tuple[str, str] | None:
     """Return (email, desktop_token) from config.json, or None if not set."""
     try:
-        data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+        data = json.loads(CONFIG_FILE.read_text(encoding="utf-8", errors="replace"))
         email = data.get("email", "").strip()
         token = data.get("desktop_token", "").strip()
         if email and token:
